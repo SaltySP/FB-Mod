@@ -68,5 +68,10 @@
 		<!-- Build Tools -->
 		<dependency rev="0.6" org="net.filebot" name="ant-spk" />
 		<dependency rev="1.6" org="org.vafer" name="jdeb" />
+
+		<!-- caffeine 2.6.2's POM declares a test-scope dependency on ycsb:core:1.13.0-RC1, which
+		     has since been pulled from Maven Central; it's never actually needed at runtime, so
+		     exclude it globally to stop Ivy from failing to resolve it -->
+		<exclude org="com.github.brianfrankcooper.ycsb" module="core" />
 	</dependencies>
 </ivy-module>
