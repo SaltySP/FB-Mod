@@ -1,5 +1,6 @@
-# FB Mod
+# Fork of [FB Mod](https://github.com/barry-allen07/FB-Mod)
 
-Download from Releases Tab
-
-See [COMPILING.md](https://github.com/barry-allen07/FB-Mod/blob/master/COMPILING.md) for build instructions
+Updated to work with TVDB API v4.
+You will need a TVDB Project API Key. There isn't one included.
+Save it inside: `%appdata%/Filebot/apikey/thetvdb.key`
+Changes were written by Claude, for me personally. Feel free to use it.
