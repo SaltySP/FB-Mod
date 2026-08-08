@@ -300,8 +300,9 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 		// are derived from the default (aired) season-type episode list, same as TheTVDB API v2 did
 		String seasonType = sortOrder == SortOrder.DVD ? "dvd" : "default";
 
-		// use the localized episodes endpoint so episode names/overviews come back translated,
-		// instead of always in the show's original language
+		// use the localized episodes endpoint so episode names come back translated where available
+		// (confirmed working in practice, despite the official OpenAPI doc's response schema for this
+		// endpoint only listing data.series and omitting data.episodes -- the doc is simply incomplete)
 		Optional<String> languageCode = getLanguageCode(locale);
 		String episodesPath = "series/" + series.getId() + "/episodes/" + seasonType;
 		if (languageCode.isPresent() && !"eng".equals(languageCode.get())) {
@@ -320,7 +321,7 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 				Integer id = getInteger(it, "id");
 				String episodeName = getString(it, "name");
 
-				// default to English episode title if the preferred language is not available
+				// default to English episode title if no translation is available in the preferred language
 				if (episodeName == null && !locale.equals(DEFAULT_LOCALE)) {
 					try {
 						episodeName = getEpisodeList(series, sortOrder, DEFAULT_LOCALE).stream().filter(e -> id.equals(e.getId())).findFirst().map(Episode::getTitle).orElse(null);
