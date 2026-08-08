@@ -188,8 +188,10 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 		String overview = getString(data, "overview");
 
 		// try to resolve localized name/overview via /series/{id}/translations/{language}
+		// NOTE: always attempt this, even for English -- the base "name"/"overview" fields reflect
+		// the show's original language (e.g. Japanese for anime), not necessarily English
 		Optional<String> languageCode = getLanguageCode(locale);
-		if (languageCode.isPresent() && !"eng".equals(languageCode.get())) {
+		if (languageCode.isPresent()) {
 			try {
 				Object translationJson = requestJson("series/" + series.getId() + "/translations/" + languageCode.get(), Cache.ONE_WEEK);
 				Object translation = getMap(translationJson, "data");
@@ -302,10 +304,13 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 
 		// use the localized episodes endpoint so episode names come back translated where available
 		// (confirmed working in practice, despite the official OpenAPI doc's response schema for this
-		// endpoint only listing data.series and omitting data.episodes -- the doc is simply incomplete)
+		// endpoint only listing data.series and omitting data.episodes -- the doc is simply incomplete).
+		// NOTE: always append the language code, even for English -- the plain (no-language-suffix)
+		// endpoint returns the show's base/original-language name, which is NOT necessarily English
+		// (e.g. Japanese for anime), so English needs the "/eng" suffix just like any other language.
 		Optional<String> languageCode = getLanguageCode(locale);
 		String episodesPath = "series/" + series.getId() + "/episodes/" + seasonType;
-		if (languageCode.isPresent() && !"eng".equals(languageCode.get())) {
+		if (languageCode.isPresent()) {
 			episodesPath += "/" + languageCode.get();
 		}
 
