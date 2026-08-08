@@ -1,0 +1,60 @@
+name: Compile
+
+on:
+  workflow_dispatch:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # build.xml's "revision" target runs `git rev-list --count master`, which needs a
+      # local branch literally named "master" (not just a detached HEAD, e.g. on PR builds)
+      - name: Ensure local 'master' ref exists
+        run: git show-ref --verify --quiet refs/heads/master || git branch master origin/master
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Install Ant + Ivy
+        run: sudo apt-get update && sudo apt-get install -y ant ivy
+
+      # ant jar's OS-Test/doUnix step downloads its own JDK 11.0.2 + JavaFX 11.0.2 SDK
+      # into cache/ via cache/get-java.sh and cache/get-jfx.sh (see app.properties for versions)
+      - name: Cache downloaded JDK/JavaFX archives
+        uses: actions/cache@v4
+        with:
+          path: |
+            cache/*.tar.gz
+            cache/*.zip
+            cache/jdk-*
+            cache/javafx-sdk-*
+          key: filebot-toolchain-${{ hashFiles('app.properties') }}
+
+      - name: Cache Ivy dependencies
+        uses: actions/cache@v4
+        with:
+          path: lib/ivy
+          key: ivy-${{ hashFiles('ivy.xml') }}
+
+      - name: Resolve dependencies (Ivy)
+        run: ant resolve
+
+      - name: Compile (ant jar)
+        run: ant jar
+
+      - name: Upload build artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: filebot-jar
+          path: dist/lib/*.jar
+          if-no-files-found: warn
