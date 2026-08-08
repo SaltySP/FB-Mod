@@ -13,6 +13,7 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.ResourceBundle;
 import java.util.logging.Level;
 import java.util.prefs.BackingStoreException;
@@ -52,7 +53,54 @@ public final class Settings {
 	}
 
 	public static String getApiKey(String name) {
-		return getApplicationProperty("apikey." + name);
+		return getApiKeyOverride(name).orElseGet(() -> getApplicationProperty("apikey." + name));
+	}
+
+	/**
+	 * Optional secondary credential for API keys that support one (e.g. a TheTVDB subscriber PIN).
+	 * Unlike {@link #getApiKey(String)} this has no bundled default and simply returns {@code null}
+	 * if no override has been configured.
+	 */
+	public static String getApiKeyPin(String name) {
+		return getApiKeyOverride(name + ".pin").orElse(null);
+	}
+
+	/**
+	 * Allow API keys (and related secrets, e.g. PINs) to be overridden externally, without having to
+	 * rebuild the application, in order of precedence:
+	 *
+	 * <ol>
+	 * <li>{@code -Dnet.filebot.apikey.<name>=...} system property
+	 * <li>{@code FILEBOT_APIKEY_<NAME>} environment variable
+	 * <li>{@code <name>.key} file inside the {@code apikey} folder of the application config directory
+	 * (e.g. {@code ~/.filebot/apikey/thetvdb.key}, or {@code ~/.filebot/apikey/thetvdb.pin.key})
+	 * </ol>
+	 */
+	private static Optional<String> getApiKeyOverride(String name) {
+		String property = System.getProperty("net.filebot.apikey." + name);
+		if (property != null && property.trim().length() > 0) {
+			return Optional.of(property.trim());
+		}
+
+		String environmentVariable = "FILEBOT_APIKEY_" + name.toUpperCase().replace('.', '_').replace('-', '_');
+		String env = System.getenv(environmentVariable);
+		if (env != null && env.trim().length() > 0) {
+			return Optional.of(env.trim());
+		}
+
+		try {
+			File file = ApplicationFolder.AppData.resolve("apikey" + File.separator + name + ".key");
+			if (file.isFile()) {
+				String value = readTextFile(file).trim();
+				if (value.length() > 0) {
+					return Optional.of(value);
+				}
+			}
+		} catch (Exception e) {
+			debug.warning(cause("Failed to read API key override: " + name, e));
+		}
+
+		return Optional.empty();
 	}
 
 	public static boolean isUnixFS() {
