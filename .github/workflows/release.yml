@@ -1,0 +1,217 @@
+name: Release
+
+# Runs only when you push a version tag (e.g. "4.8.6"), or when triggered manually
+# pointing at an existing tag. It will NOT run on ordinary commits.
+on:
+  push:
+    tags:
+      - '*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+
+  # ---------------------------------------------------------------------
+  # Linux: .deb (with bundled JRE), .deb (universal, no JRE), portable .tar.xz
+  # ---------------------------------------------------------------------
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Ensure local 'master' ref exists
+        run: git show-ref --verify --quiet refs/heads/master || git branch master origin/master
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Install Ant
+        run: sudo apt-get update && sudo apt-get install -y ant
+
+      - name: Install Ivy (as Ant global lib)
+        shell: bash
+        run: |
+          mkdir -p ~/.ant/lib
+          curl -fsSL -o ~/.ant/lib/ivy.jar https://repo1.maven.org/maven2/org/apache/ivy/ivy/2.5.2/ivy-2.5.2.jar
+
+      - name: Cache downloaded JDK/JavaFX archives
+        uses: actions/cache@v4
+        with:
+          path: |
+            cache/*.tar.gz
+            cache/*.zip
+          key: filebot-toolchain-linux-${{ hashFiles('app.properties') }}
+
+      - name: Cache Ivy dependencies
+        uses: actions/cache@v4
+        with:
+          path: lib/ivy
+          key: ivy-${{ hashFiles('ivy.xml') }}
+
+      - run: ant resolve
+      - run: ant jar
+      - run: ant deb
+      - run: ant deb-universal
+      - run: ant tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            dist/*.deb
+            dist/*.tar.xz
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------
+  # Windows: portable .zip (with bundled JRE), .msi installer (x64)
+  # ---------------------------------------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Ensure local 'master' ref exists
+        shell: bash
+        run: git show-ref --verify --quiet refs/heads/master || git branch master origin/master
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Install Ant + WiX Toolset
+        shell: pwsh
+        run: |
+          choco install ant -y
+          choco install wixtoolset -y
+          $wixBin = Get-ChildItem "C:\Program Files (x86)\WiX Toolset*" -Directory | Select-Object -First 1
+          echo "$($wixBin.FullName)\bin" >> $env:GITHUB_PATH
+
+      - name: Install Ivy (as Ant global lib)
+        shell: bash
+        run: |
+          mkdir -p ~/.ant/lib
+          curl -fsSL -o ~/.ant/lib/ivy.jar https://repo1.maven.org/maven2/org/apache/ivy/ivy/2.5.2/ivy-2.5.2.jar
+
+      - name: Cache downloaded JDK/JavaFX archives
+        uses: actions/cache@v4
+        with:
+          path: |
+            cache/*.tar.gz
+            cache/*.zip
+          key: filebot-toolchain-windows-${{ hashFiles('app.properties') }}
+
+      - name: Cache Ivy dependencies
+        uses: actions/cache@v4
+        with:
+          path: lib/ivy
+          key: ivy-${{ hashFiles('ivy.xml') }}
+
+      - run: ant resolve
+      - run: ant jar
+      - run: ant zip
+      - run: ant msi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-packages
+          path: |
+            dist/*.zip
+            dist/*.msi
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------
+  # macOS: .app bundle (as .app.tar.xz), .dmg, .pkg installer
+  # ---------------------------------------------------------------------
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Ensure local 'master' ref exists
+        run: git show-ref --verify --quiet refs/heads/master || git branch master origin/master
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Ant + appdmg
+        run: |
+          brew install ant
+          npm install -g appdmg
+
+      - name: Install Ivy (as Ant global lib)
+        run: |
+          mkdir -p ~/.ant/lib
+          curl -fsSL -o ~/.ant/lib/ivy.jar https://repo1.maven.org/maven2/org/apache/ivy/ivy/2.5.2/ivy-2.5.2.jar
+
+      - name: Cache downloaded JDK/JavaFX archives
+        uses: actions/cache@v4
+        with:
+          path: |
+            cache/*.tar.gz
+            cache/*.zip
+          key: filebot-toolchain-macos-${{ hashFiles('app.properties') }}
+
+      - name: Cache Ivy dependencies
+        uses: actions/cache@v4
+        with:
+          path: lib/ivy
+          key: ivy-${{ hashFiles('ivy.xml') }}
+
+      - run: ant resolve
+      - run: ant jar
+      - run: ant app
+      - name: Build .pkg installer
+        continue-on-error: true # unsigned pkgbuild/productbuild may fail without a Developer ID cert
+        run: ant pkg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-packages
+          path: |
+            dist/*.dmg
+            dist/*.app.tar.xz
+            dist/*.pkg
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------
+  # Collect everything and attach it to a GitHub Release
+  # ---------------------------------------------------------------------
+  release:
+    needs: [ build-linux, build-windows, build-macos ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-files
+          merge-multiple: true
+
+      - name: Create/update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: release-files/*
