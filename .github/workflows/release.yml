@@ -60,6 +60,13 @@ jobs:
           key: ivy-${{ hashFiles('ivy.xml') }}
 
       - run: ant resolve
+
+      # Ant's own <tar compression="xz"> task needs the XZ for Java library on ANT's
+      # classpath (not just the app's) to produce .tar.xz output
+      - name: Add XZ for Java to Ant's classpath
+        shell: bash
+        run: cp lib/ivy/jar/xz.jar ~/.ant/lib/
+
       - run: ant jar
       - run: ant deb
       - run: ant deb-universal
@@ -138,7 +145,9 @@ jobs:
   # macOS: .app bundle (as .app.tar.xz), .dmg, .pkg installer
   # ---------------------------------------------------------------------
   build-macos:
-    runs-on: macos-latest
+    # This build script downloads/bundles x86_64-only JDK/JavaFX/native libs throughout,
+    # so it needs an Intel runner, not the arm64 (Apple Silicon) default macos-latest
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
         with:
@@ -182,6 +191,12 @@ jobs:
           key: ivy-${{ hashFiles('ivy.xml') }}
 
       - run: ant resolve
+
+      # Ant's own <tar compression="xz"> task (used by the "app" target) needs XZ for
+      # Java on ANT's classpath, not just the app's
+      - name: Add XZ for Java to Ant's classpath
+        run: cp lib/ivy/jar/xz.jar ~/.ant/lib/
+
       - run: ant jar
       - run: ant app
       - name: Build .pkg installer
