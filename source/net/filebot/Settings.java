@@ -95,6 +95,9 @@ public final class Settings {
 				if (value.length() > 0) {
 					return Optional.of(value);
 				}
+			} else if (file.getParentFile().mkdirs() || file.getParentFile().isDirectory()) {
+				// touch an empty placeholder file so the override location is easy to find
+				file.createNewFile();
 			}
 		} catch (Exception e) {
 			debug.warning(cause("Failed to read API key override: " + name, e));
