@@ -16,6 +16,8 @@ import java.net.URL;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -36,9 +38,15 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 	private static final Locale DEFAULT_LOCALE = Locale.ENGLISH;
 
 	private String apikey;
+	private String pin;
 
 	public TheTVDBClient(String apikey) {
+		this(apikey, null);
+	}
+
+	public TheTVDBClient(String apikey, String pin) {
 		this.apikey = apikey;
+		this.pin = pin;
 	}
 
 	@Override
@@ -57,26 +65,25 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 	}
 
 	protected Object postJson(String path, Object object) throws Exception {
-		// curl -X POST --header 'Content-Type: application/json' --header 'Accept: application/json' 'https://api.thetvdb.com/login' --data '{"apikey":"XXXXX"}'
+		// curl -X POST --header 'Content-Type: application/json' --header 'Accept: application/json' 'https://api4.thetvdb.com/v4/login' --data '{"apikey":"XXXXX","pin":"XXXXX"}'
 		ByteBuffer response = post(getEndpoint(path), json(object, false).getBytes(UTF_8), "application/json", null);
 		return readJson(UTF_8.decode(response));
 	}
 
-	protected Object requestJson(String path, Locale locale, Duration expirationTime) throws Exception {
-		Cache cache = Cache.getCache(locale == null || locale == Locale.ROOT ? getName() : getName() + "_" + locale.getLanguage(), CacheType.Monthly);
-		return cache.json(path, this::getEndpoint).fetch(fetchIfModified(() -> getRequestHeader(locale))).expire(expirationTime).get();
+	protected Object requestJson(String path, Duration expirationTime) throws Exception {
+		// TheTVDB API v4 no longer varies responses by Accept-Language header (translations are
+		// fetched via dedicated per-language endpoints/paths instead), so a single shared cache
+		// namespace keyed by request path is sufficient and correct.
+		Cache cache = Cache.getCache(getName(), CacheType.Monthly);
+		return cache.json(path, this::getEndpoint).fetch(fetchIfModified(this::getRequestHeader)).expire(expirationTime).get();
 	}
 
 	protected URL getEndpoint(String path) throws Exception {
-		return new URL("https://api.thetvdb.com/" + path);
+		return new URL("https://api4.thetvdb.com/v4/" + path);
 	}
 
-	private Map<String, String> getRequestHeader(Locale locale) {
-		Map<String, String> header = new LinkedHashMap<String, String>(3);
-
-		getLanguageCode(locale).ifPresent(languageCode -> {
-			header.put("Accept-Language", languageCode);
-		});
+	private Map<String, String> getRequestHeader() {
+		Map<String, String> header = new LinkedHashMap<String, String>(2);
 
 		header.put("Accept", "application/json");
 		header.put("Authorization", "Bearer " + getAuthorizationToken());
@@ -84,34 +91,35 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 		return header;
 	}
 
+	/**
+	 * TheTVDB API v4 identifies languages by ISO 639-2/T (3-letter) codes, e.g. eng, deu, fra, zho.
+	 */
 	private Optional<String> getLanguageCode(Locale locale) {
-		// Note: ISO 639 is not a stable standard— some languages' codes have changed.
-		// Locale's constructor recognizes both the new and the old codes for the languages whose codes have changed,
-		// but this function always returns the old code.
-		return Optional.ofNullable(locale).map(Locale::getLanguage).map(code -> {
-			switch (code) {
-			case "iw":
-				return "he"; // Hebrew
-			case "in":
-				return "id"; // Indonesian
-			case "":
-				return null; // empty language code
-			default:
-				return code;
+		return Optional.ofNullable(locale).filter(l -> !l.getLanguage().isEmpty()).map(l -> {
+			try {
+				return l.getISO3Language();
+			} catch (Exception e) {
+				return null;
 			}
 		});
 	}
 
 	private String token = null;
 	private Instant tokenExpireInstant = null;
-	private Duration tokenExpireDuration = Duration.ofHours(23); // token expires after 24 hours
+	private Duration tokenExpireDuration = Duration.ofDays(27); // token expires after 1 month
 
 	private String getAuthorizationToken() {
 		synchronized (tokenExpireDuration) {
 			if (token == null || (tokenExpireInstant != null && Instant.now().isAfter(tokenExpireInstant))) {
 				try {
-					Object json = postJson("login", singletonMap("apikey", apikey));
-					token = getString(json, "token");
+					Map<String, Object> credentials = new LinkedHashMap<String, Object>(2);
+					credentials.put("apikey", apikey);
+					if (pin != null && pin.length() > 0) {
+						credentials.put("pin", pin);
+					}
+
+					Object json = postJson("login", credentials);
+					token = getString(getMap(json, "data"), "token");
 					tokenExpireInstant = Instant.now().plus(tokenExpireDuration);
 				} catch (Exception e) {
 					throw new IllegalStateException("Failed to retrieve authorization token: " + e.getMessage(), e);
@@ -121,14 +129,35 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 		}
 	}
 
-	protected List<SearchResult> search(String path, Map<String, Object> query, Locale locale, Duration expirationTime) throws Exception {
-		Object json = requestJson(path + "?" + encodeParameters(query, true), locale, expirationTime);
+	@Override
+	public List<SearchResult> fetchSearchResult(String query, Locale locale) throws Exception {
+		Map<String, Object> parameters = new LinkedHashMap<String, Object>(2);
+		parameters.put("query", query);
+		parameters.put("type", "series");
+
+		Object json = requestJson("search?" + encodeParameters(parameters, true), Cache.ONE_DAY);
+
+		Optional<String> languageCode = getLanguageCode(locale);
 
 		return streamJsonObjects(json, "data").map(it -> {
-			// e.g. aliases, banner, firstAired, id, network, overview, seriesName, status
-			int id = getInteger(it, "id");
-			String seriesName = getString(it, "seriesName");
-			String[] aliasNames = stream(getArray(it, "aliases")).toArray(String[]::new);
+			// e.g. tvdb_id, name, aliases, translations, overview, image_url, year, network, status
+			Integer id = getInteger(it, "tvdb_id");
+			if (id == null) {
+				return null;
+			}
+
+			String seriesName = getString(it, "name");
+
+			// prefer localized name if available
+			Map<?, ?> translations = getMap(it, "translations");
+			if (languageCode.isPresent()) {
+				String localizedName = getString(translations, languageCode.get());
+				if (localizedName != null && localizedName.length() > 0) {
+					seriesName = localizedName;
+				}
+			}
+
+			String[] aliasNames = stream(getArray(it, "aliases")).filter(Objects::nonNull).map(Object::toString).toArray(String[]::new);
 
 			if (seriesName == null || seriesName.startsWith("**") || seriesName.endsWith("**")) {
 				debug.warning(format("Ignore invalid series: %s [%d]", seriesName, id));
@@ -140,45 +169,115 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 	}
 
 	@Override
-	public List<SearchResult> fetchSearchResult(String query, Locale locale) throws Exception {
-		return search("search/series", singletonMap("name", query), locale, Cache.ONE_DAY);
-	}
-
-	@Override
 	public TheTVDBSeriesInfo getSeriesInfo(int id, Locale language) throws Exception {
 		return getSeriesInfo(new SearchResult(id), language);
 	}
 
 	@Override
 	public TheTVDBSeriesInfo getSeriesInfo(SearchResult series, Locale locale) throws Exception {
-		Object json = requestJson("series/" + series.getId(), locale, Cache.ONE_WEEK);
+		Object json = requestJson("series/" + series.getId() + "/extended", Cache.ONE_WEEK);
 		Object data = getMap(json, "data");
 
 		TheTVDBSeriesInfo info = new TheTVDBSeriesInfo(this, locale, series.getId());
 		info.setSlug(getString(data, "slug"));
-		info.setAliasNames(Stream.of(series.getAliasNames(), getArray(data, "aliases")).flatMap(it -> stream(it)).map(Object::toString).distinct().toArray(String[]::new));
 
-		info.setName(getString(data, "seriesName"));
-		info.setCertification(getString(data, "rating"));
-		info.setNetwork(getString(data, "network"));
-		info.setStatus(getString(data, "status"));
+		String[] aliasNames = Stream.concat(Stream.of(series.getAliasNames()), streamJsonObjects(data, "aliases").map(a -> getString(a, "name"))).filter(Objects::nonNull).distinct().toArray(String[]::new);
+		info.setAliasNames(aliasNames);
 
-		info.setRating(getDouble(data, "siteRating"));
-		info.setRatingCount(getInteger(data, "siteRatingCount"));
+		String name = getString(data, "name");
+		String overview = getString(data, "overview");
 
-		info.setRuntime(matchInteger(getString(data, "runtime")));
-		info.setGenres(stream(getArray(data, "genre")).map(Object::toString).collect(toList()));
+		// try to resolve localized name/overview via /series/{id}/translations/{language}
+		Optional<String> languageCode = getLanguageCode(locale);
+		if (languageCode.isPresent() && !"eng".equals(languageCode.get())) {
+			try {
+				Object translationJson = requestJson("series/" + series.getId() + "/translations/" + languageCode.get(), Cache.ONE_WEEK);
+				Object translation = getMap(translationJson, "data");
+
+				String translatedName = getString(translation, "name");
+				if (translatedName != null && translatedName.length() > 0) {
+					name = translatedName;
+				}
+				String translatedOverview = getString(translation, "overview");
+				if (translatedOverview != null && translatedOverview.length() > 0) {
+					overview = translatedOverview;
+				}
+			} catch (Exception e) {
+				debug.finest(cause("Failed to retrieve series translation", e));
+			}
+		}
+
+		info.setName(name);
+		info.setOverview(overview);
+
+		info.setCertification(getCertification(data));
+		info.setNetwork(getNetwork(data));
+		info.setStatus(getStringOrNull(getMap(data, "status"), "name"));
+
+		info.setRating(getDouble(data, "score"));
+		info.setRatingCount(null);
+
+		info.setRuntime(getInteger(data, "averageRuntime"));
+		info.setGenres(streamJsonObjects(data, "genres").map(g -> getString(g, "name")).filter(Objects::nonNull).collect(toList()));
 		info.setStartDate(getStringValue(data, "firstAired", SimpleDate::parse));
 
 		// TheTVDB SeriesInfo extras
-		info.setImdbId(getString(data, "imdbId"));
-		info.setOverview(getString(data, "overview"));
-		info.setAirsDayOfWeek(getString(data, "airsDayOfWeek"));
+		info.setImdbId(streamJsonObjects(data, "remoteIds").filter(r -> "IMDB".equalsIgnoreCase(getString(r, "sourceName"))).map(r -> getString(r, "id")).findFirst().orElse(null));
+		info.setAirsDayOfWeek(getAirsDayOfWeek(data));
 		info.setAirsTime(getString(data, "airsTime"));
-		info.setBannerUrl(getStringValue(data, "banner", this::resolveImage));
-		info.setLastUpdated(getStringValue(data, "lastUpdated", Long::parseLong));
+		info.setBannerUrl(getStringValue(data, "image", this::resolveImage));
+		info.setLastUpdated(getStringValue(data, "lastUpdated", TheTVDBClient::parseTimestamp));
 
 		return info;
+	}
+
+	private String getCertification(Object data) {
+		List<Map<?, ?>> ratings = streamJsonObjects(data, "contentRatings").collect(toList());
+		return ratings.stream().filter(r -> "usa".equalsIgnoreCase(getString(r, "country"))).map(r -> getString(r, "name")).findFirst().orElseGet(() -> {
+			return ratings.stream().map(r -> getString(r, "name")).filter(Objects::nonNull).findFirst().orElse(null);
+		});
+	}
+
+	private String getNetwork(Object data) {
+		String network = getStringOrNull(getMap(data, "latestNetwork"), "name");
+		if (network == null) {
+			network = getStringOrNull(getMap(data, "originalNetwork"), "name");
+		}
+		return network;
+	}
+
+	private static final String[] WEEKDAYS = { "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday" };
+
+	private String getAirsDayOfWeek(Object data) {
+		Object airsDays = getMap(data, "airsDays");
+		for (String day : WEEKDAYS) {
+			if (Boolean.TRUE.equals(asMap(airsDays).get(day))) {
+				return day.substring(0, 1).toUpperCase() + day.substring(1);
+			}
+		}
+		return null;
+	}
+
+	private String getStringOrNull(Object node, String key) {
+		return node == null ? null : getString(node, key);
+	}
+
+	private static Long parseTimestamp(String value) {
+		if (value == null || value.isEmpty()) {
+			return null;
+		}
+		try {
+			return Instant.parse(value).toEpochMilli();
+		} catch (Exception e) {
+			// not an ISO-8601 instant, fall through
+		}
+		try {
+			String datePart = value.length() >= 10 ? value.substring(0, 10) : value;
+			return LocalDate.parse(datePart).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+		} catch (Exception e) {
+			debug.warning(format("Bad lastUpdated value: %s => %s", value, e));
+			return null;
+		}
 	}
 
 	@Override
@@ -197,21 +296,21 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 			info.setName(series.getName());
 		}
 
+		// DVD order needs its own season-type; all other orders (Airdate, Absolute, AbsoluteAirdate)
+		// are derived from the default (aired) season-type episode list, same as TheTVDB API v2 did
+		String seasonType = sortOrder == SortOrder.DVD ? "dvd" : "default";
+
 		// fetch episode data
 		List<Episode> episodes = new ArrayList<Episode>();
 		List<Episode> specials = new ArrayList<Episode>();
 
-		for (int i = 1, n = 1; i <= n; i++) {
-			Object json = requestJson("series/" + series.getId() + "/episodes?page=" + i, locale, Cache.ONE_DAY);
+		for (int page = 0;; page++) {
+			Object json = requestJson("series/" + series.getId() + "/episodes/" + seasonType + "?page=" + page, Cache.ONE_DAY);
+			Object data = getMap(json, "data");
 
-			Integer lastPage = getInteger(getMap(json, "links"), "last");
-			if (lastPage != null) {
-				n = lastPage;
-			}
-
-			streamJsonObjects(json, "data").forEach(it -> {
+			streamJsonObjects(data, "episodes").forEach(it -> {
 				Integer id = getInteger(it, "id");
-				String episodeName = getString(it, "episodeName");
+				String episodeName = getString(it, "name");
 
 				// default to English episode title if the preferred language is not available
 				if (episodeName == null && !locale.equals(DEFAULT_LOCALE)) {
@@ -223,27 +322,14 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 				}
 
 				Integer absoluteNumber = getInteger(it, "absoluteNumber");
-				SimpleDate airdate = getStringValue(it, "firstAired", SimpleDate::parse);
+				SimpleDate airdate = getStringValue(it, "aired", SimpleDate::parse);
 
-				// default numbering
-				Integer episodeNumber = getInteger(it, "airedEpisodeNumber");
-				Integer seasonNumber = getInteger(it, "airedSeason");
+				// default numbering (aired order, or dvd order if seasonType == "dvd")
+				Integer episodeNumber = getInteger(it, "number");
+				Integer seasonNumber = getInteger(it, "seasonNumber");
 
 				// adjust for forced absolute numbering (if possible)
-				if (sortOrder == SortOrder.DVD) {
-					Integer dvdSeasonNumber = getInteger(it, "dvdSeason");
-					Number dvdEpisodeNumber = getDecimal(it, "dvdEpisodeNumber"); // e.g. 4.2
-
-					// require both values to be valid integer numbers
-					if (dvdSeasonNumber != null && dvdEpisodeNumber != null) {
-						seasonNumber = dvdSeasonNumber;
-						episodeNumber = dvdEpisodeNumber.intValue();
-
-						if (episodeNumber.doubleValue() != dvdEpisodeNumber.doubleValue()) {
-							debug.finest(format("[%s] Coerce episode number [%s] to [%s]", info, dvdEpisodeNumber, episodeNumber));
-						}
-					}
-				} else if (sortOrder == SortOrder.Absolute && absoluteNumber != null && absoluteNumber > 0) {
+				if (sortOrder == SortOrder.Absolute && absoluteNumber != null && absoluteNumber > 0) {
 					seasonNumber = null;
 					episodeNumber = absoluteNumber;
 				} else if (sortOrder == SortOrder.AbsoluteAirdate && airdate != null) {
@@ -260,6 +346,11 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 					specials.add(new Episode(info.getName(), null, null, episodeName, absoluteNumber, episodeNumber, airdate, id, new SeriesInfo(info)));
 				}
 			});
+
+			Object next = asMap(getMap(json, "links")).get("next");
+			if (next == null) {
+				break;
+			}
 		}
 
 		// episodes my not be ordered by DVD episode number
@@ -285,8 +376,14 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 			throw new IllegalArgumentException("Illegal IMDbID ID: " + imdbid);
 		}
 
-		List<SearchResult> result = search("search/series", singletonMap("imdbId", String.format("tt%07d", imdbid)), locale, Cache.ONE_MONTH);
-		return result.size() > 0 ? result.get(0) : null;
+		String remoteId = String.format("tt%07d", imdbid);
+		Object json = requestJson("search/remoteid/" + remoteId, Cache.ONE_MONTH);
+
+		return streamJsonObjects(json, "data").map(it -> getMap(it, "series")).filter(m -> m.size() > 0).map(it -> {
+			Integer id = getInteger(it, "id");
+			String name = getString(it, "name");
+			return id == null ? null : new SearchResult(id, name);
+		}).filter(Objects::nonNull).findFirst().orElse(null);
 	}
 
 	@Override
@@ -296,16 +393,43 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 
 	@Override
 	public List<Artwork> getArtwork(int id, String category, Locale locale) throws Exception {
-		Object json = requestJson("series/" + id + "/images/query?keyType=" + category, locale, Cache.ONE_MONTH);
+		Map<String, Object> parameters = new LinkedHashMap<String, Object>(2);
+		Integer typeId = getArtworkTypeIds().get(category == null ? null : category.toLowerCase());
+		if (typeId != null) {
+			parameters.put("type", typeId);
+		}
+		getLanguageCode(locale).ifPresent(lang -> parameters.put("lang", lang));
 
-		return streamJsonObjects(json, "data").map(it -> {
-			String subKey = getString(it, "subKey");
-			String resolution = getString(it, "resolution");
-			URL url = getStringValue(it, "fileName", this::resolveImage);
-			Double rating = getDouble(getMap(it, "ratingsInfo"), "average");
+		String query = parameters.isEmpty() ? "" : "?" + encodeParameters(parameters, true);
+		Object json = requestJson("series/" + id + "/artworks" + query, Cache.ONE_MONTH);
+		Object data = getMap(json, "data");
 
-			return new Artwork(Stream.of(category, subKey, resolution), url, locale, rating);
+		return streamJsonObjects(data, "artworks").map(it -> {
+			URL url = getStringValue(it, "image", this::resolveImage);
+			Double rating = getDouble(it, "score");
+			Integer width = getInteger(it, "width");
+			Integer height = getInteger(it, "height");
+			boolean includesText = Boolean.TRUE.equals(asMap(it).get("includesText"));
+
+			String resolution = (width != null && height != null) ? (width + "x" + height) : null;
+
+			return new Artwork(Stream.of(category, includesText ? "text" : "graphical", resolution), url, locale, rating);
 		}).sorted(Artwork.RATING_ORDER).collect(toList());
+	}
+
+	// cache the (mostly static) artwork type dictionary, e.g. "banner" -> 1, "poster" -> 2, "fanart" -> 3
+	private Map<String, Integer> getArtworkTypeIds() throws Exception {
+		Object json = requestJson("artwork/types", Cache.ONE_MONTH);
+
+		Map<String, Integer> types = new LinkedHashMap<String, Integer>();
+		streamJsonObjects(json, "data").forEach(it -> {
+			String name = getString(it, "name");
+			Integer typeId = getInteger(it, "id");
+			if (name != null && typeId != null) {
+				types.putIfAbsent(name.toLowerCase(), typeId);
+			}
+		});
+		return types;
 	}
 
 	protected URL resolveImage(String path) {
@@ -313,54 +437,64 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 			return null;
 		}
 
-		// TheTVDB API v2 does not have a dedicated banner mirror
 		try {
-			return new URL("https://thetvdb.com/banners/" + path);
+			// TheTVDB API v4 returns fully qualified artwork URLs
+			if (path.startsWith("http://") || path.startsWith("https://")) {
+				return new URL(path);
+			}
+			return new URL("https://artworks.thetvdb.com/" + (path.startsWith("/") ? path.substring(1) : path));
 		} catch (Exception e) {
 			throw new IllegalArgumentException(path, e);
 		}
 	}
 
 	public List<String> getLanguages() throws Exception {
-		Object response = requestJson("languages", Locale.ROOT, Cache.ONE_MONTH);
-		return streamJsonObjects(response, "data").map(it -> getString(it, "abbreviation")).collect(toList());
+		Object response = requestJson("languages", Cache.ONE_MONTH);
+		return streamJsonObjects(response, "data").map(it -> getString(it, "shortCode")).filter(Objects::nonNull).collect(toList());
 	}
 
 	public List<Person> getActors(int seriesId, Locale locale) throws Exception {
-		Object response = requestJson("series/" + seriesId + "/actors", locale, Cache.ONE_MONTH);
+		Object json = requestJson("series/" + seriesId + "/extended", Cache.ONE_MONTH);
+		Object data = getMap(json, "data");
 
-		// e.g. [id:68414, seriesId:78874, name:Summer Glau, role:River Tam, sortOrder:2, image:actors/68414.jpg, imageAuthor:513, imageAdded:0000-00-00 00:00:00, lastUpdated:2011-08-18 11:53:14]
-		return streamJsonObjects(response, "data").map(it -> {
-			String name = getString(it, "name");
-			String character = getString(it, "role");
-			Integer order = getInteger(it, "sortOrder");
-			URL image = getStringValue(it, "image", this::resolveImage);
+		return streamJsonObjects(data, "characters").filter(it -> "Actor".equalsIgnoreCase(getString(it, "peopleType"))).map(it -> {
+			String name = getString(it, "personName");
+			String character = getString(it, "name");
+			Integer order = getInteger(it, "sort");
+			URL image = getStringValue(it, "personImgURL", this::resolveImage);
 
 			return new Person(name, character, Person.ACTOR, null, order, image);
 		}).sorted(Person.CREDIT_ORDER).collect(toList());
 	}
 
 	public EpisodeInfo getEpisodeInfo(int id, Locale locale) throws Exception {
-		Object response = requestJson("episodes/" + id, locale, Cache.ONE_MONTH);
+		Object response = requestJson("episodes/" + id + "/extended", Cache.ONE_MONTH);
 		Object data = getMap(response, "data");
 
 		Integer seriesId = getInteger(data, "seriesId");
 		String overview = getString(data, "overview");
 
-		Double rating = getDouble(data, "siteRating");
-		Integer votes = getInteger(data, "siteRatingCount");
+		Double rating = getDouble(data, "score");
+		Integer votes = null; // TheTVDB API v4 no longer exposes a per-episode vote count
 
 		List<Person> people = new ArrayList<Person>();
 
-		for (Object it : getArray(data, "directors")) {
-			people.add(new Person(it.toString(), Person.DIRECTOR));
-		}
-		for (Object it : getArray(data, "writers")) {
-			people.add(new Person(it.toString(), Person.WRITER));
-		}
-		for (Object it : getArray(data, "guestStars")) {
-			people.add(new Person(it.toString(), Person.GUEST_STAR));
-		}
+		streamJsonObjects(data, "characters").forEach(it -> {
+			String peopleType = getString(it, "peopleType");
+			String name = getString(it, "personName");
+
+			if (name == null || peopleType == null) {
+				return;
+			}
+
+			if (Person.DIRECTOR.equalsIgnoreCase(peopleType)) {
+				people.add(new Person(name, Person.DIRECTOR));
+			} else if (Person.WRITER.equalsIgnoreCase(peopleType)) {
+				people.add(new Person(name, Person.WRITER));
+			} else if (Person.GUEST_STAR.equalsIgnoreCase(peopleType)) {
+				people.add(new Person(name, getString(it, "name"), Person.GUEST_STAR, null, getInteger(it, "sort"), getStringValue(it, "personImgURL", this::resolveImage)));
+			}
+		});
 
 		return new EpisodeInfo(this, locale, seriesId, id, people, overview, rating, votes);
 	}
