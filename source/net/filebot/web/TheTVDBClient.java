@@ -300,12 +300,20 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 		// are derived from the default (aired) season-type episode list, same as TheTVDB API v2 did
 		String seasonType = sortOrder == SortOrder.DVD ? "dvd" : "default";
 
+		// use the localized episodes endpoint so episode names/overviews come back translated,
+		// instead of always in the show's original language
+		Optional<String> languageCode = getLanguageCode(locale);
+		String episodesPath = "series/" + series.getId() + "/episodes/" + seasonType;
+		if (languageCode.isPresent() && !"eng".equals(languageCode.get())) {
+			episodesPath += "/" + languageCode.get();
+		}
+
 		// fetch episode data
 		List<Episode> episodes = new ArrayList<Episode>();
 		List<Episode> specials = new ArrayList<Episode>();
 
 		for (int page = 0;; page++) {
-			Object json = requestJson("series/" + series.getId() + "/episodes/" + seasonType + "?page=" + page, Cache.ONE_DAY);
+			Object json = requestJson(episodesPath + "?page=" + page, Cache.ONE_DAY);
 			Object data = getMap(json, "data");
 
 			streamJsonObjects(data, "episodes").forEach(it -> {
