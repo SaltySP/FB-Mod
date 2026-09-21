@@ -60,7 +60,7 @@ public class ArgumentBean {
 	@Option(name = "--db", usage = "Database", metaVar = "[TheTVDB, AniDB, TheMovieDB::TV] or [TheMovieDB] or [AcoustID, ID3] or [xattr, exif, file]")
 	public String db;
 
-	@Option(name = "--order", usage = "Episode order", metaVar = "[Airdate, DVD, Absolute, AbsoluteAirdate]")
+	@Option(name = "--order", usage = "Episode order", metaVar = "[Airdate, DVD, Absolute, AbsoluteAirdate, Alternate, Regional, Official]")
 	public String order = "Airdate";
 
 	@Option(name = "--action", usage = "Rename action", metaVar = "[move, copy, keeplink, symlink, hardlink, clone, test]")

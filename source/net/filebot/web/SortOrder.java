@@ -7,7 +7,8 @@ import java.util.List;
 
 public enum SortOrder {
 
-	Airdate, DVD, Absolute, AbsoluteAirdate;
+	// NOTE: new values must be appended at the end (ordinal() is used as cache key)
+	Airdate, DVD, Absolute, AbsoluteAirdate, Alternate, Regional, Official;
 
 	@Override
 	public String toString() {
@@ -18,8 +19,14 @@ public enum SortOrder {
 			return "DVD Order";
 		case Absolute:
 			return "Absolute Order";
-		default:
+		case AbsoluteAirdate:
 			return "Absolute Airdate Order";
+		case Alternate:
+			return "Alternate Order";
+		case Regional:
+			return "Regional Order";
+		default:
+			return "Official Order";
 		}
 	}
 

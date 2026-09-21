@@ -282,6 +282,21 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 		}
 	}
 
+	protected static String getSeasonType(SortOrder sortOrder) {
+		switch (sortOrder) {
+		case DVD:
+			return "dvd";
+		case Alternate:
+			return "alternate";
+		case Regional:
+			return "regional";
+		case Official:
+			return "official";
+		default:
+			return "default";
+		}
+	}
+
 	@Override
 	protected SeriesData fetchSeriesData(SearchResult series, SortOrder sortOrder, Locale locale) throws Exception {
 		// fetch series info
@@ -298,9 +313,9 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 			info.setName(series.getName());
 		}
 
-		// DVD order needs its own season-type; all other orders (Airdate, Absolute, AbsoluteAirdate)
-		// are derived from the default (aired) season-type episode list, same as TheTVDB API v2 did
-		String seasonType = sortOrder == SortOrder.DVD ? "dvd" : "default";
+		// DVD, Alternate, Regional and Official orders need their own TheTVDB season-type;
+		// Airdate, Absolute and AbsoluteAirdate are derived from the default (aired) season-type episode list
+		String seasonType = getSeasonType(sortOrder);
 
 		// use the localized episodes endpoint so episode names come back translated where available
 		// (confirmed working in practice, despite the official OpenAPI doc's response schema for this
@@ -338,7 +353,7 @@ public class TheTVDBClient extends AbstractEpisodeListProvider implements Artwor
 				Integer absoluteNumber = getInteger(it, "absoluteNumber");
 				SimpleDate airdate = getStringValue(it, "aired", SimpleDate::parse);
 
-				// default numbering (aired order, or dvd order if seasonType == "dvd")
+				// default numbering (as defined by the selected season-type, e.g. aired, dvd, alternate)
 				Integer episodeNumber = getInteger(it, "number");
 				Integer seasonNumber = getInteger(it, "seasonNumber");
 
